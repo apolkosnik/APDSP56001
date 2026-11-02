@@ -1,4 +1,4 @@
-# DSP56k
+# DSP56001
 
 A Motorola DSP56001 in SystemVerilog, as the Atari Falcon030 uses it: the
 core, its on-chip memories and ROMs, the host interface to the 68030, the SSI
