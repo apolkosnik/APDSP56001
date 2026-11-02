@@ -48,8 +48,12 @@ decode always matches Hatari's dispatch tables.
   `falcon_dsp.sv` gives the timing and how it maps onto Hatari's SSI.
 
 The header of each file lists its behaviour in detail, including the few
-places where it follows the hardware documentation instead of Hatari (SWI,
-WAIT and STOP do what the manual says; Hatari treats them as NOPs).
+places where it follows the hardware documentation instead of Hatari: SWI,
+WAIT and STOP do what the manual says (Hatari treats them as NOPs);
+bit-reverse addressing with a zero modifier leaves Rn unchanged (Hatari sets
+bit 16); and in SSI normal mode a frame sync starts a word, as in network mode
+(Hatari never clears its wait for a frame in normal mode, so it neither sends
+nor receives).
 
 ## Resources
 
@@ -67,7 +71,9 @@ FALCON=/path/to/Falcon_MiSTer HATARI=/path/to/hatari tb/run.sh   # plus the cros
 Needs Verilator, gcc and Python 3, and a Hatari source tree that has been
 configured with CMake (the build directory with its `config.h`); `HATARI`
 defaults to `~/hatari`. Hatari's `dsp_cpu.c` and `dsp_core.c` are compiled
-unmodified as the golden model.
+unmodified as the golden model; where the RTL follows the hardware
+documentation instead, the lockstep checker gives Hatari the hardware
+behaviour for that case and counts the events in the summary.
 
 The tests:
 

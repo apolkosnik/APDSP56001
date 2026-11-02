@@ -33,6 +33,10 @@
 //     new CRB before the old TE/RE bits are compared, so it never re-arms.
 //   - With SHFD set Hatari's bit swap can produce a 25-bit RX value; RX keeps
 //     the low 24 bits.
+//   - A frame sync ends the transmitter's (receiver's) wait for a frame in
+//     normal mode too (DSP56000 manual 11.3.7.2: normal mode transfers one
+//     word per frame sync).  Hatari clears waitFrameTX/RX only in network
+//     mode, so its normal mode never transmits or receives a word.
 
 module dsp_periph (
     input             clk,
@@ -182,8 +186,8 @@ module dsp_periph (
         endcase
         if (crb_shfd) tx_shift = swap_wl(tx_shift[23:0], wl_sel);
     end
-    // SC2 for this slot clears the frame wait in network mode
-    wire       tx_wait_now = wait_tx && !(crb_mode && ssi_frame);
+    // SC2 for this slot clears the frame wait (network and normal mode)
+    wire       tx_wait_now = wait_tx && !ssi_frame;
     wire       tx_go       = crb_te && !tx_wait_now;
     assign ssi_tx_data = tx_go ? tx_shift[15:0] : 16'd0;
 
@@ -369,11 +373,10 @@ module dsp_periph (
         // ---------------- SSI slot (crossbar) ----------------
         if (ssi_slot_stb && ssi_tx_en) begin
             // SC2 (transmit frame sync)
-            if (crb_mode) begin
-                if (ssi_frame) begin v_ssisr[2] = 1'b1; v_wait_tx = 1'b0; end
-                else v_ssisr[2] = 1'b0;
-            end else
-                v_ssisr[2] = 1'b1;
+            // (a frame sync starts the next word in both modes: see header)
+            if (ssi_frame) v_wait_tx = 1'b0;
+            if (crb_mode) v_ssisr[2] = ssi_frame;
+            else          v_ssisr[2] = 1'b1;
             // SCK
             if (crb_te && !v_wait_tx) begin
                 v_tval = tx_shift;
@@ -387,11 +390,9 @@ module dsp_periph (
         if (ssi_slot_stb && ssi_rx_en) begin
             v_rval = {{8{ssi_rx_data[15]}}, ssi_rx_data};
             // SC1 (receive frame sync)
-            if (crb_mode) begin
-                if (ssi_rx_frame) begin v_ssisr[3] = 1'b1; v_wait_rx = 1'b0; end
-                else v_ssisr[3] = 1'b0;
-            end else
-                v_ssisr[3] = 1'b1;
+            if (ssi_rx_frame) v_wait_rx = 1'b0;
+            if (crb_mode) v_ssisr[3] = ssi_rx_frame;
+            else          v_ssisr[3] = 1'b1;
             // SC0
             t25 = rx_conv(v_rval, wl_sel, crb_shfd);
             if (crb_re && !v_wait_rx) begin

@@ -211,9 +211,65 @@ static void test_agu(Rtl &rtl, Stats &st) {
     e += check("x:(r3)-n3", dsp_core.registers[DSP_REG_Y0], 0x100000 + 0x0f);
     e += check("AGU delay slot (old r4)", dsp_core.registers[DSP_REG_Y1], 0x100000 + 0x30);
     e += check("AGU delay slot over (new r4)", dsp_core.registers[DSP_REG_A1], 0x100000 + 0x38);
-    report("AGU modulo / bit-reverse / modes / delay slot vs Hatari", rr.mismatches == 0 && e == 0,
-           fmt("(%llu insns, %llu mismatching, %d check failures)", (unsigned long long)rr.insns,
-               (unsigned long long)rr.mismatches, e));
+    uint64_t insns = rr.insns, mis = rr.mismatches;
+
+    // bit reverse (Mn = 0) with a zero modifier: the reverse-carry add of 0
+    // leaves Rn unchanged (Hatari reverses 17 bits and sets bit 16 of Rn)
+    {
+        Prog pz;
+        pz.org(0x40);
+        pz.move_imm(RR0 + 5, 0x0005);
+        pz.move_imm(RN0 + 5, 0);
+        pz.movec_imm24(RM0 + 5, 0);
+        pz.w(nop());                                        // AGU delay slot
+        // AGU pipeline slot free: Mn presented to Hatari's AGU only
+        pz.w(xy(0, true, RB, true, ea(5, 5), 0));           // move x:(r5+n5),b   (X:$05)
+        pz.w(xy(1, false, RR0 + 5, true, ea(1, 5), 0));     // move r5,y:(r5)+n5  (Y:$05 = 5)
+        // AGU pipeline slot taken by r6: Mn substituted in the register file
+        pz.w(imm8(RR0 + 6, 0x60, 0));                       // move #$60,r6
+        pz.w(xy(0, false, RR0 + 5, true, ea(1, 5), 0));     // move r5,x:(r5)+n5  (X:$05 = 5)
+        // ... and Mn read as data by the same instruction (unmodelled path)
+        pz.move_imm(RR0 + 7, 0x0007);
+        pz.move_imm(RN0 + 7, 0);
+        pz.movec_imm24(RM0 + 7, 0);
+        pz.w(imm8(RR0 + 6, 0x61, 0));                       // move #$61,r6
+        pz.w(movec_ea(false, 1, ea(1, 7), RM0 + 7));        // movec m7,y:(r7)+n7 (Y:$07 = 0)
+        // X: and Y: move, both address registers bit reverse with Nn = 0
+        pz.move_imm(RR0 + 2, 0x0012);
+        pz.move_imm(RN0 + 2, 0);
+        pz.movec_imm24(RM0 + 2, 0);
+        pz.w(nop());                                        // AGU delay slot
+        pz.w(xymove(true, 0, 1, 2, true, 0, 1, 1, 0));      // move x:(r2)+n2,x0 y:(r5)+n5,y0
+        pz.label("done"); pz.w(nop());
+        pz.xint[5] = 0x100005;
+        pz.xint[0x12] = 0x100012;
+        pz.yint[5] = 0x555555;
+        pz.yint[7] = 0x777777;
+        DspState rz = base_regs(0x40);
+        Stats before = st;
+        RunResult rz_r = run_lockstep(rtl, st, pz, &rz, pz.at("done"), 200);
+        insns += rz_r.insns; mis += rz_r.mismatches;
+        e += check("bit reverse, Nn = 0: program reached the end", rz_r.reached, 1);
+        e += check("bit reverse, Nn = 0: x:(r5+n5) address", dsp_core.registers[DSP_REG_B1], 0x100005);
+        e += check("bit reverse, Nn = 0: move r5,y:(r5)+n5 stores r5", dsp_core.ramint[1][5], 0x000005);
+        e += check("bit reverse, Nn = 0: move r5,x:(r5)+n5 stores r5", dsp_core.ramint[0][5], 0x000005);
+        e += check("bit reverse, Nn = 0: r5 unchanged", dsp_core.registers[DSP_REG_R0 + 5], 0x0005);
+        e += check("bit reverse, Nn = 0: movec m7,y:(r7)+n7 stores m7", dsp_core.ramint[1][7], 0x000000);
+        e += check("bit reverse, Nn = 0: r7 unchanged", dsp_core.registers[DSP_REG_R0 + 7], 0x0007);
+        e += check("bit reverse, Nn = 0: XY move x:(r2)+n2", dsp_core.registers[DSP_REG_X0], 0x100012);
+        e += check("bit reverse, Nn = 0: XY move y:(r5)+n5", dsp_core.registers[DSP_REG_Y0], 0x000005);
+        e += check("bit reverse, Nn = 0: r2 unchanged", dsp_core.registers[DSP_REG_R0 + 2], 0x0012);
+        // every path of the testbench's Hatari bit-reverse model ran
+        // four of them leave a 17-bit Rn in Hatari ((Rn+Nn) restores Rn and
+        // Hatari's 16-bit memory address drops bit 16)
+        e += check("bit-reverse model: instructions modelled", st.dev_bitrev0 - before.dev_bitrev0, 4);
+        e += check("bit-reverse model: Mn-as-data fallback ran once",
+                   st.dev_bitrev0_unmodelled - before.dev_bitrev0_unmodelled, 1);
+        e += check("bit-reverse model: no 17-bit Rn missed", st.dev_bitrev0_missed - before.dev_bitrev0_missed, 0);
+    }
+    report("AGU modulo / bit-reverse / modes / delay slot vs Hatari", mis == 0 && e == 0,
+           fmt("(%llu insns, %llu mismatching, %d check failures)", (unsigned long long)insns,
+               (unsigned long long)mis, e));
 }
 
 // ===========================================================================
@@ -419,6 +475,44 @@ static void test_interrupts(Rtl &rtl, Stats &st) {
         e += check("SSI receive interrupt read RX (16-bit word in RX[23:8])",
                    dsp_core.registers[DSP_REG_Y1], 0x666600);
         e += check("SSI transmit word (TX[23:8])", dsp_core.ssi.transmit_value & 0xffff, 0xabcd);
+    }
+    // ---- SSI receive / transmit interrupts in normal mode ----
+    // (DSP56000 manual 11.3.7.2: one word per frame sync.  Hatari never ends
+    // the wait for a frame in normal mode; the testbench applies the
+    // hardware behaviour to it, see Lockstep::step)
+    {
+        Prog pg;
+        pg.org(0x0c); pg.w(movep_reg(false, 0, RY1, 0x2f)); pg.w(alu(0x00));  // movep x:rx,y1
+        pg.org(0x10); pg.w(movep_reg(true, 0, RX1, 0x2f)); pg.w(alu(0x00));   // movep x1,x:tx
+        pg.org(0x40);
+        pg.movep_imm(0x3f, 0x3000);                         // IPR: SSI level 3
+        pg.movep_imm(0x2c, 0x4000);                         // CRA: 16 bit words
+        pg.movep_imm(0x2d, 0xf000);                         // CRB: RIE TIE RE TE, normal mode
+        pg.move_imm(RX1, 0x123400);
+        pg.label("loop"); pg.w(nop()); pg.wl12(jmp(0), "loop");
+        DspState r = base_regs(0x40);
+        // two slots without frame sync (still waiting: nothing moves), then
+        // one word per frame sync
+        uint16_t rx_seq[6] = {0x1111, 0x2222, 0x5678, 0x4444, 0x9abc, 0x6666};
+        int ri = 0;
+        Stats before = st;
+        uint32_t y1_before[6] = {0};   // Y1 just before slot k: the words of slots < k
+        auto ev = [&](uint64_t i, HostEv &, SsiEv &s) {
+            if (i >= 12 && (i % 8) == 4 && ri < 6) {
+                y1_before[ri] = dsp_core.registers[DSP_REG_Y1];
+                s.valid = true; s.tx_en = true; s.rx_en = true;
+                s.frame = s.rx_frame = ri >= 2;
+                s.rx_data = rx_seq[ri++];
+            }
+        };
+        RunResult rr = run_lockstep(rtl, st, pg, &r, 0xffff, 80, ev);
+        insns += rr.insns; mis += rr.mismatches;
+        e += check("SSI normal mode: no word received before the first frame sync", y1_before[2], 0);
+        e += check("SSI normal mode: word received after a frame sync (RX[23:8])", y1_before[3], 0x567800);
+        e += check("SSI normal mode: last word received", dsp_core.registers[DSP_REG_Y1], 0x666600);
+        e += check("SSI normal mode: transmit word (TX[23:8])", dsp_core.ssi.transmit_value & 0xffff, 0x1234);
+        e += check("SSI normal mode: frame sync ended the waits (deviation applied)",
+                   st.dev_ssi_normal_fs - before.dev_ssi_normal_fs, 2);
     }
     // ---- illegal instruction, stack overflow, trace ----
     {

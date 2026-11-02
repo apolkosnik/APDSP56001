@@ -34,7 +34,10 @@ struct Stats {
     uint64_t mismatching_insns = 0;
     uint64_t cyc_match = 0, cyc_mismatch = 0;
     uint64_t host_events = 0, ssi_events = 0;
-    uint64_t dev_bitrev0 = 0;        // documented deviation events (Hatari bit 16 in Rn)
+    uint64_t dev_bitrev0 = 0;        // insns run with bit-reverse / zero modifier modelled (Hatari bit 16 in Rn)
+    uint64_t dev_bitrev0_unmodelled = 0;  // of those: Mn also used as data, Hatari ran unmodified
+    uint64_t dev_bitrev0_missed = 0; // 17-bit Rn left by Hatari after the model (a testbench bug)
+    uint64_t dev_ssi_normal_fs = 0;  // normal mode frame sync ended a TX/RX frame wait (Hatari: never)
     uint64_t dev_rx25 = 0;           // Hatari SHFD swap left bit 24 in ssi.RX
     uint64_t dev_crb_rearm = 0;      // TE/RE enabled by a CRB write: hardware waits for frame sync
     uint64_t stop_hw_insn = 0;       // runs ended at SWI/WAIT/STOP (hardware semantics)

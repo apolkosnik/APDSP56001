@@ -56,7 +56,8 @@
 //   - SWI raises its interrupt (P:$0006), WAIT waits for an interrupt, STOP
 //     stops until reset (Hatari: NOPs).
 //   - Bit-reverse addressing with modifier 0 leaves Rn unchanged.
-//   - HREQ level / reset level / handshake TFS: see dsp_periph.sv.
+//   - HREQ level / reset level / handshake TFS / SSI normal mode frame
+//     sync: see dsp_periph.sv.
 //   - The crossbar link carries 16-bit words: with a 24-bit SSI word length
 //     only the low 16 bits of Hatari's transmit_value reach the crossbar
 //     (as Hatari's DAC path, which takes int16), and received words are the

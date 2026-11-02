@@ -1,6 +1,96 @@
 // Falcon DSP testbench - lockstep differential engine. Plain ASCII.
 #include "tb_lockstep.h"
 
+// ---------------------------------------------------------------------------
+// documented deviation: bit-reverse addressing (Mn = 0) with a zero
+// modifier (Nn = 0 for (Rn)+Nn, (Rn)-Nn, (Rn+Nn)).  Hatari's
+// dsp_update_rn_bitreverse finds no set bit in the modifier and reverses 17
+// bits, which puts bit 16 into Rn, into the (Rn+Nn) address and into
+// anything the same instruction copies from Rn (move r2,y:(r2)+n2 stores
+// $01xxxx).  The hardware's reverse-carry add of 0 leaves Rn unchanged, which
+// is also what Hatari's linear and modulo updates do with a zero modifier.
+// An instruction after which Hatari holds a 17-bit Rn is run again with its
+// address generator seeing a non-zero Mn for that Rn, while all other reads of
+// Mn (moves, MOVEC, ...) still see 0:
+//   - through the AGU pipeline slot agu_pipeline_reg/val[0] (read only by
+//     dsp_calc_ea, and overwritten at the end of every instruction), when it
+//     is free or already holds Mn;
+//   - otherwise by setting registers[Mn] for the instruction and restoring
+//     it afterwards.  That is invisible only if the instruction does not use
+//     Mn as data, so the instruction runs twice, with $FFFF and $7FFF; equal
+//     results prove it.  If they differ, Hatari runs unmodified and the
+//     instruction is counted as unmodelled (Rn masked to 16 bits).
+// ---------------------------------------------------------------------------
+static uint32_t agu_now(int reg) {
+    return dsp_core.agu_pipeline_reg[0] == (uint32_t)reg ? dsp_core.agu_pipeline_val[0]
+                                                         : dsp_core.registers[reg];
+}
+
+struct GoldenSnap {
+    dsp_core_t core;
+    int sc1, sc2, hs;
+    uint32_t sc2last;
+    void save() { memcpy(&core, &dsp_core, sizeof core); sc1 = golden_sc1_calls; sc2 = golden_sc2_calls;
+                  hs = golden_hs_record_frame; sc2last = golden_sc2_last; }
+    void load() const { memcpy(&dsp_core, &core, sizeof core); golden_sc1_calls = sc1; golden_sc2_calls = sc2;
+                        golden_hs_record_frame = hs; golden_sc2_last = sc2last; }
+    bool same() const { return !memcmp(&core, &dsp_core, sizeof core) && sc1 == golden_sc1_calls &&
+                               sc2 == golden_sc2_calls && hs == golden_hs_record_frame &&
+                               sc2last == golden_sc2_last; }
+};
+static GoldenSnap snap_pre, snap_a;
+
+// execute one instruction with the M registers in reg_m[] presented as mval
+// in registers[] (restored afterwards unless the instruction changed them)
+static void exec_reg_subst(const int *reg_m, int n, uint32_t mval) {
+    for (int k = 0; k < n; k++) dsp_core.registers[reg_m[k]] = mval;
+    dsp56k_execute_instruction();
+    for (int k = 0; k < n; k++) {
+        if (dsp_core.registers[reg_m[k]] == mval) dsp_core.registers[reg_m[k]] = 0;
+        // a move into Mn saved the old (substituted) value for the AGU delay slot
+        if (dsp_core.agu_pipeline_reg[0] == (uint32_t)reg_m[k] && dsp_core.agu_pipeline_val[0] == mval)
+            dsp_core.agu_pipeline_val[0] = 0;
+    }
+}
+
+static void golden_execute(Stats &st) {
+    bool cand = false;
+    for (int i = 0; i < 8; i++)
+        if (agu_now(DSP_REG_M0 + i) == 0 && (agu_now(DSP_REG_N0 + i) & 0xffff) == 0) cand = true;
+    if (!cand) { dsp56k_execute_instruction(); return; }
+    // run Hatari as it is; a 17-bit Rn shows which registers took the
+    // zero-modifier bit-reverse update ((Rn)+ / (Rn)- with Mn = 0 are
+    // regular bit-reverse updates by 1 and stay as they are)
+    snap_pre.save();
+    dsp56k_execute_instruction();
+    int leak[8], nleak = 0;
+    for (int i = 0; i < 8; i++)
+        if (dsp_core.registers[DSP_REG_R0 + i] > 0xffff) leak[nleak++] = i;
+    if (!nleak) return;
+    st.dev_bitrev0++;
+    snap_pre.load();
+    int rest[8], nrest = 0;
+    for (int k = 0; k < nleak; k++) {
+        uint32_t m = DSP_REG_M0 + leak[k];
+        if (dsp_core.agu_pipeline_reg[0] == m) dsp_core.agu_pipeline_val[0] = 0xffff;
+        else if (dsp_core.agu_pipeline_reg[0] == 0) { dsp_core.agu_pipeline_reg[0] = m; dsp_core.agu_pipeline_val[0] = 0xffff; }
+        else rest[nrest++] = m;
+    }
+    if (!nrest) { dsp56k_execute_instruction(); return; }
+    snap_a.save();                      // pre-state with the pipeline injection
+    exec_reg_subst(rest, nrest, 0xffff);
+    static GoldenSnap res_ffff;
+    res_ffff.save();
+    snap_a.load();
+    exec_reg_subst(rest, nrest, 0x7fff);
+    if (res_ffff.same()) return;
+    // Mn used as data by this instruction: run Hatari unmodified
+    st.dev_bitrev0_unmodelled++;
+    snap_pre.load();
+    dsp56k_execute_instruction();
+    for (int i = 0; i < 8; i++) dsp_core.registers[DSP_REG_R0 + i] &= 0xffff;
+}
+
 
 void Lockstep::start(const std::vector<uint32_t> &p, const uint32_t *xint, const uint32_t *yint,
                      const std::vector<uint32_t> &ext, const DspState *regs) {
@@ -63,7 +153,7 @@ int Lockstep::step(const HostEv *h, const SsiEv *s, uint16_t *host_rd, uint16_t 
     // ---------------- golden ----------------
     uint32_t prev_state = dsp_core.interrupt_state;
     uint32_t prev_crb = dsp_core.periph[DSP_SPACE_X][DSP_SSI_CRB];
-    dsp56k_execute_instruction();
+    golden_execute(st);
     // documented deviation: enabling TE / RE re-arms the wait for the next
     // frame sync (hardware); Hatari's CRB write overwrites the old value
     // before dsp_core_ssi_configure() compares it, so it never re-arms
@@ -80,20 +170,28 @@ int Lockstep::step(const HostEv *h, const SsiEv *s, uint16_t *host_rd, uint16_t 
         st.interrupts++;
     if (dsp_core.interrupt_state == DSP_INTERRUPT_LONG && prev_state != DSP_INTERRUPT_LONG)
         st.long_interrupts++;
-    // documented deviation: Hatari's bit-reverse update with modifier 0 sets
-    // bit 16 of Rn; the RTL leaves Rn unchanged (low 16 bits identical)
-    bool dev_bitrev = false;
+    // golden_execute() models bit-reverse with a zero modifier; a 17-bit Rn
+    // left over means that model missed a case (counted as a mismatch)
+    int bitrev_missed = 0;
     for (int i = 0; i < 8; i++)
         if (dsp_core.registers[DSP_REG_R0 + i] > 0xffff) {
-            dev_bitrev = true;
+            printf("  FAIL: Hatari left R%d = %06x (17-bit bit-reverse result not modelled)\n",
+                   i, dsp_core.registers[DSP_REG_R0 + i]);
+            st.dev_bitrev0_missed++;
+            bitrev_missed++;
             dsp_core.registers[DSP_REG_R0 + i] &= 0xffff;
         }
-    if (dev_bitrev) st.dev_bitrev0++;
     // events after the instruction
     uint16_t g_tx = 0, g_rd = 0;
     if (s && s->valid) {
         st.ssi_events++;
         if (s->tx_en) {
+            // documented deviation: a frame sync ends the wait for a frame in
+            // normal mode too (Hatari: network mode only)
+            if (s->frame && !dsp_core.ssi.crb_mode && dsp_core.ssi.waitFrameTX) {
+                dsp_core.ssi.waitFrameTX = 0;
+                st.dev_ssi_normal_fs++;
+            }
             dsp_core_ssi_Receive_SC2(s->frame ? 1 : 0);
             dsp_core_ssi_Receive_SCK();
             g_tx = dsp_core.ssi.transmit_value & 0xffff;
@@ -102,6 +200,10 @@ int Lockstep::step(const HostEv *h, const SsiEv *s, uint16_t *host_rd, uint16_t 
         if (s->rx_en) {
             uint16_t d = s->loopback ? g_tx : s->rx_data;
             dsp_core.ssi.received_value = (uint32_t)(int32_t)(int16_t)d & 0xffffff;
+            if (s->rx_frame && !dsp_core.ssi.crb_mode && dsp_core.ssi.waitFrameRX) {
+                dsp_core.ssi.waitFrameRX = 0;
+                st.dev_ssi_normal_fs++;
+            }
             dsp_core_ssi_Receive_SC1(s->rx_frame ? 1 : 0);
             dsp_core_ssi_Receive_SC0();
             // documented deviation: Hatari's SHFD bit swap can leave a 25th
@@ -169,7 +271,7 @@ int Lockstep::step(const HostEv *h, const SsiEv *s, uint16_t *host_rd, uint16_t 
     char ctx[96];
     snprintf(ctx, sizeof ctx, "insn #%llu %06x (%s)", (unsigned long long)st.insns, w, hatari_class(w));
     bool v = verbose && reported < max_report;
-    int n = 0;
+    int n = bitrev_missed;
     if (rcyc != gcyc) {
         st.cyc_mismatch++;
         if (v) printf("  MISMATCH %s: cycles expected (Hatari) %u, RTL %u\n", ctx, gcyc, rcyc);

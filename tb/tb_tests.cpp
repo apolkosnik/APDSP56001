@@ -155,14 +155,17 @@ static void test_random(Rtl &rtl, const TestConfig &cfg, Stats &st) {
     report("random differential vs Hatari", total_mis == 0 && st.insns > 0,
            fmt("(%d seeds, %llu insns compared, %llu mismatching, cycles %llu/%llu match, "
                "host events %llu, ssi events %llu, interrupts %llu (long %llu), "
-               "runs ended at SWI/WAIT/STOP %d, stuck %d; documented-deviation events: bit-reverse-0 %llu, "
-               "SSI RX bit 24 %llu, CRB TE/RE re-arm %llu)",
+               "runs ended at SWI/WAIT/STOP %d, stuck %d; documented-deviation events: bit-reverse-0 %llu "
+               "(unmodelled %llu, missed %llu), SSI RX bit 24 %llu, CRB TE/RE re-arm %llu, "
+               "SSI normal mode frame sync %llu)",
                runs, (unsigned long long)st.insns, (unsigned long long)st.mismatching_insns,
                (unsigned long long)st.cyc_match, (unsigned long long)(st.cyc_match + st.cyc_mismatch),
                (unsigned long long)st.host_events, (unsigned long long)st.ssi_events,
                (unsigned long long)st.interrupts, (unsigned long long)st.long_interrupts,
                early_hw, early_stuck, (unsigned long long)st.dev_bitrev0,
-               (unsigned long long)st.dev_rx25, (unsigned long long)st.dev_crb_rearm));
+               (unsigned long long)st.dev_bitrev0_unmodelled, (unsigned long long)st.dev_bitrev0_missed,
+               (unsigned long long)st.dev_rx25, (unsigned long long)st.dev_crb_rearm,
+               (unsigned long long)st.dev_ssi_normal_fs));
 }
 
 void run_directed_tests(Rtl &rtl, const TestConfig &cfg, Stats &st);
